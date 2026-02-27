@@ -1,0 +1,71 @@
+{
+  "id": "openclaw-local-supermemory",
+  "name": "Local Supermemory",
+  "version": "1.0.0",
+  "description": "Local Supermemory plugin for OpenClaw - no cloud required",
+  "kind": "memory",
+  "entry": "./index.ts",
+  "author": "amtoc",
+  "license": "MIT",
+  "repository": "https://github.com/amtocbot-droid/local-supermemory",
+  "uiHints": {
+    "baseUrl": {
+      "label": "Server URL",
+      "placeholder": "http://localhost:3456",
+      "help": "URL of your local Supermemory server"
+    },
+    "containerTag": {
+      "label": "Container Tag",
+      "placeholder": "openclaw_myhostname",
+      "help": "Memory namespace. Default: openclaw_{hostname}",
+      "advanced": true
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Inject relevant memories before every AI turn"
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically store conversations"
+    },
+    "maxRecallResults": {
+      "label": "Max Recall Results",
+      "placeholder": "10",
+      "help": "Maximum memories injected per turn",
+      "advanced": true
+    },
+    "debug": {
+      "label": "Debug Logging",
+      "help": "Enable verbose debug logs",
+      "advanced": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": { "type": "string" },
+      "containerTag": { "type": "string" },
+      "autoRecall": { "type": "boolean" },
+      "autoCapture": { "type": "boolean" },
+      "maxRecallResults": { "type": "number", "minimum": 1, "maximum": 20 },
+      "profileFrequency": { "type": "number", "minimum": 1, "maximum": 500 },
+      "captureMode": { "type": "string", "enum": ["everything", "all"] },
+      "debug": { "type": "boolean" },
+      "enableCustomContainerTags": { "type": "boolean" },
+      "customContainers": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "tag": { "type": "string" },
+            "description": { "type": "string" }
+          },
+          "required": ["tag", "description"]
+        }
+      },
+      "customContainerInstructions": { "type": "string" }
+    },
+    "required": []
+  }
+}
