@@ -1,214 +1,351 @@
-/**
- * Local Supermemory Client
- * 
- * A client that connects to the local Supermemory server instead of the cloud API.
- */
-
-import { log } from "./logger.ts";
+import Supermemory from "supermemory"
+import {
+	getRequestIntegrity,
+	sanitizeContent,
+	validateApiKeyFormat,
+	validateContainerTag,
+} from "./lib/validate.js"
+import { log } from "./logger.ts"
 
 export type SearchResult = {
-  id: string;
-  content: string;
-  memory?: string;
-  similarity?: number;
-  metadata?: Record<string, unknown>;
-};
+	id: string
+	content: string
+	memory?: string
+	similarity?: number
+	metadata?: Record<string, unknown>
+}
 
 export type ProfileSearchResult = {
-  memory?: string;
-  updatedAt?: string;
-  similarity?: number;
-  [key: string]: unknown;
-};
+	memory?: string
+	updatedAt?: string
+	similarity?: number
+	[key: string]: unknown
+}
 
 export type ProfileResult = {
-  static: string[];
-  dynamic: string[];
-  searchResults: ProfileSearchResult[];
-};
+	static: string[]
+	dynamic: string[]
+	searchResults: ProfileSearchResult[]
+}
 
-export class LocalSupermemoryClient {
-  private baseUrl: string;
-  private containerTag: string;
+function limitText(text: string, max: number): string {
+	return text.length > max ? `${text.slice(0, max)}…` : text
+}
 
-  constructor(baseUrl: string, containerTag: string) {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
-    this.containerTag = containerTag;
-    log.info(`initialized local client (container: ${containerTag}, url: ${this.baseUrl})`);
-  }
+// Local client for self-hosted Supermemory
+class LocalSupermemoryClient {
+	private baseUrl: string
+	private containerTag: string
 
-  private async request(method: string, path: string, body?: unknown): Promise<unknown> {
-    const url = `${this.baseUrl}${path}`;
-    
-    const response = await fetch(url, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+	constructor(baseUrl: string, containerTag: string) {
+		this.baseUrl = baseUrl.replace(/\/$/, "")
+		this.containerTag = containerTag
+		log.info(`local client initialized (container: ${containerTag}, url: ${baseUrl})`)
+	}
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Local Supermemory API error: ${response.status} ${text}`);
-    }
+	async addMemory(
+		content: string,
+		metadata?: Record<string, string | number | boolean>,
+		customId?: string,
+		containerTag?: string,
+	): Promise<{ id: string }> {
+		const tag = containerTag ?? this.containerTag
+		const response = await fetch(`${this.baseUrl}/api/v1/add`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ content, metadata, customId, containerTag: tag }),
+		})
+		const result = await response.json()
+		return { id: result.id }
+	}
 
-    return response.json();
-  }
+	async search(
+		query: string,
+		limit = 5,
+		containerTag?: string,
+	): Promise<SearchResult[]> {
+		const tag = containerTag ?? this.containerTag
+		const response = await fetch(`${this.baseUrl}/api/v1/search/memories`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ q: query, containerTag: tag, limit }),
+		})
+		const data = await response.json()
+		return (data.results ?? []).map((r: any) => ({
+			id: r.id,
+			content: r.memory ?? "",
+			memory: r.memory,
+			similarity: r.similarity,
+			metadata: r.metadata,
+		}))
+	}
 
-  async addMemory(
-    content: string,
-    metadata?: Record<string, string | number | boolean>,
-    customId?: string,
-    containerTag?: string,
-  ): Promise<{ id: string }> {
-    const tag = containerTag ?? this.containerTag;
+	async getProfile(
+		query?: string,
+		containerTag?: string,
+	): Promise<ProfileResult> {
+		const tag = containerTag ?? this.containerTag
+		const url = new URL(`${this.baseUrl}/api/v1/profile`)
+		if (query) url.searchParams.set("q", query)
+		url.searchParams.set("containerTag", tag)
+		const response = await fetch(url.toString())
+		const data = await response.json()
+		return {
+			static: data.profile?.static ?? [],
+			dynamic: data.profile?.dynamic ?? [],
+			searchResults: data.searchResults?.results ?? [],
+		}
+	}
 
-    log.debugRequest("add", {
-      contentLength: content.length,
-      customId,
-      metadata,
-      containerTag: tag,
-    });
+	async deleteMemory(
+		id: string,
+		containerTag?: string,
+	): Promise<{ id: string; forgotten: boolean }> {
+		const tag = containerTag ?? this.containerTag
+		const response = await fetch(`${this.baseUrl}/api/v1/memories/forget`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ id, containerTag: tag }),
+		})
+		return await response.json()
+	}
 
-    const result = await this.request('POST', '/api/v1/add', {
-      content,
-      containerTag: tag,
-      metadata,
-      customId,
-    }) as { id: string };
+	async forgetByQuery(
+		query: string,
+		containerTag?: string,
+	): Promise<{ success: boolean; message: string }> {
+		const results = await this.search(query, 5, containerTag)
+		if (results.length === 0) {
+			return { success: false, message: "No matching memory found to forget." }
+		}
+		const target = results[0]
+		await this.deleteMemory(target.id, containerTag)
+		const preview = limitText(target.content || target.memory || "", 100)
+		return { success: true, message: `Forgot: "${preview}"` }
+	}
 
-    log.debugResponse("add", { id: result.id });
-    return result;
-  }
+	async wipeAllMemories(): Promise<{ deletedCount: number }> {
+		const response = await fetch(`${this.baseUrl}/api/v1/documents/list`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ containerTags: [this.containerTag] }),
+		})
+		const data = await response.json()
+		const ids = (data.memories ?? []).map((m: any) => m.id)
+		if (ids.length === 0) return { deletedCount: 0 }
+		await fetch(`${this.baseUrl}/api/v1/documents/deleteBulk`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ ids }),
+		})
+		return { deletedCount: ids.length }
+	}
 
-  async search(
-    query: string,
-    limit = 5,
-    containerTag?: string,
-  ): Promise<SearchResult[]> {
-    const tag = containerTag ?? this.containerTag;
+	getContainerTag(): string {
+		return this.containerTag
+	}
+}
 
-    log.debugRequest("search.memories", {
-      query,
-      limit,
-      containerTag: tag,
-    });
+export class SupermemoryClient {
+	private client: Supermemory | LocalSupermemoryClient
+	private containerTag: string
 
-    const response = await this.request('POST', '/api/v1/search/memories', {
-      q: query,
-      containerTag: tag,
-      limit,
-    }) as { results: Array<{ id: string; memory?: string; similarity?: number; metadata?: Record<string, unknown> }> };
+	constructor(apiKey: string, containerTag: string, baseUrl?: string) {
+		const tagCheck = validateContainerTag(containerTag)
+		if (!tagCheck.valid) {
+			log.warn(`container tag warning: ${tagCheck.reason}`)
+		}
 
-    const results: SearchResult[] = (response.results ?? []).map((r) => ({
-      id: r.id,
-      content: r.memory ?? "",
-      memory: r.memory,
-      similarity: r.similarity,
-      metadata: r.metadata ?? undefined,
-    }));
+		this.containerTag = containerTag
 
-    log.debugResponse("search.memories", { count: results.length });
-    return results;
-  }
+		// Use local client if baseUrl is provided
+		if (baseUrl) {
+			this.client = new LocalSupermemoryClient(baseUrl, containerTag)
+			log.info(`using local supermemory at ${baseUrl}`)
+		} else {
+			const keyCheck = validateApiKeyFormat(apiKey)
+			if (!keyCheck.valid) {
+				throw new Error(`invalid API key: ${keyCheck.reason}`)
+			}
+			const integrityHeaders = getRequestIntegrity(apiKey, containerTag)
+			this.client = new Supermemory({
+				apiKey,
+				defaultHeaders: integrityHeaders,
+			})
+			log.info(`initialized (container: ${containerTag})`)
+		}
+	}
 
-  async getProfile(
-    query?: string,
-    containerTag?: string,
-  ): Promise<ProfileResult> {
-    const tag = containerTag ?? this.containerTag;
+	async addMemory(
+		content: string,
+		metadata?: Record<string, string | number | boolean>,
+		customId?: string,
+		containerTag?: string,
+	): Promise<{ id: string }> {
+		const cleaned = sanitizeContent(content)
+		const tag = containerTag ?? this.containerTag
 
-    log.debugRequest("profile", { containerTag: tag, query });
+		log.debugRequest("add", {
+			contentLength: cleaned.length,
+			customId,
+			metadata,
+			containerTag: tag,
+		})
 
-    const params = new URLSearchParams({ containerTag: tag });
-    if (query) params.set('q', query);
+		const result = await this.client.add({
+			content: cleaned,
+			containerTag: tag,
+			...(metadata && { metadata }),
+			...(customId && { customId }),
+		})
 
-    const response = await this.request('GET', `/api/v1/profile?${params}`) as {
-      profile?: { static?: string[]; dynamic?: string[] };
-      searchResults?: { results?: ProfileSearchResult[] };
-    };
+		log.debugResponse("add", { id: result.id })
+		return { id: result.id }
+	}
 
-    log.debugResponse("profile.raw", response);
+	async search(
+		query: string,
+		limit = 5,
+		containerTag?: string,
+	): Promise<SearchResult[]> {
+		const tag = containerTag ?? this.containerTag
 
-    const result: ProfileResult = {
-      static: response.profile?.static ?? [],
-      dynamic: response.profile?.dynamic ?? [],
-      searchResults: (response.searchResults?.results ?? []) as ProfileSearchResult[],
-    };
+		log.debugRequest("search.memories", {
+			query,
+			limit,
+			containerTag: tag,
+		})
 
-    log.debugResponse("profile", {
-      staticCount: result.static.length,
-      dynamicCount: result.dynamic.length,
-      searchCount: result.searchResults.length,
-    });
-    return result;
-  }
+		const response = await this.client.search.memories({
+			q: query,
+			containerTag: tag,
+			limit,
+		})
 
-  async deleteMemory(
-    id: string,
-    containerTag?: string,
-  ): Promise<{ id: string; forgotten: boolean }> {
-    const tag = containerTag ?? this.containerTag;
+		const results: SearchResult[] = (response.results ?? []).map((r) => ({
+			id: r.id,
+			content: r.memory ?? "",
+			memory: r.memory,
+			similarity: r.similarity,
+			metadata: r.metadata ?? undefined,
+		}))
 
-    log.debugRequest("memories.delete", {
-      id,
-      containerTag: tag,
-    });
+		log.debugResponse("search.memories", { count: results.length })
+		return results
+	}
 
-    const result = await this.request('POST', '/api/v1/memories/forget', {
-      containerTag: tag,
-      id,
-    }) as { id: string; forgotten: boolean };
+	async getProfile(
+		query?: string,
+		containerTag?: string,
+	): Promise<ProfileResult> {
+		const tag = containerTag ?? this.containerTag
 
-    log.debugResponse("memories.delete", result);
-    return result;
-  }
+		log.debugRequest("profile", { containerTag: tag, query })
 
-  async forgetByQuery(
-    query: string,
-    containerTag?: string,
-  ): Promise<{ success: boolean; message: string }> {
-    log.debugRequest("forgetByQuery", { query, containerTag });
+		const response = await this.client.profile({
+			containerTag: tag,
+			...(query && { q: query }),
+		})
 
-    const results = await this.search(query, 5, containerTag);
-    if (results.length === 0) {
-      return { success: false, message: "No matching memory found to forget." };
-    }
+		log.debugResponse("profile.raw", response)
 
-    const target = results[0];
-    await this.deleteMemory(target.id, containerTag);
+		const result: ProfileResult = {
+			static: response.profile?.static ?? [],
+			dynamic: response.profile?.dynamic ?? [],
+			searchResults: (response.searchResults?.results ??
+				[]) as ProfileSearchResult[],
+		}
 
-    const preview = (target.content || target.memory || "").slice(0, 100);
-    return { success: true, message: `Forgot: "${preview}"` };
-  }
+		log.debugResponse("profile", {
+			staticCount: result.static.length,
+			dynamicCount: result.dynamic.length,
+			searchCount: result.searchResults.length,
+		})
+		return result
+	}
 
-  async wipeAllMemories(): Promise<{ deletedCount: number }> {
-    log.debugRequest("wipe", { containerTag: this.containerTag });
+	async deleteMemory(
+		id: string,
+		containerTag?: string,
+	): Promise<{ id: string; forgotten: boolean }> {
+		const tag = containerTag ?? this.containerTag
 
-    // Get all document IDs
-    const response = await this.request('POST', '/api/v1/documents/list', {
-      containerTags: [this.containerTag],
-      limit: 1000,
-    }) as { memories: Array<{ id: string }> };
+		log.debugRequest("memories.delete", {
+			id,
+			containerTag: tag,
+		})
+		const result = await this.client.memories.forget({
+			containerTag: tag,
+			id,
+		})
+		log.debugResponse("memories.delete", result)
+		return result
+	}
 
-    const ids = (response.memories ?? []).map(m => m.id);
+	async forgetByQuery(
+		query: string,
+		containerTag?: string,
+	): Promise<{ success: boolean; message: string }> {
+		log.debugRequest("forgetByQuery", { query, containerTag })
 
-    if (ids.length === 0) {
-      log.debug("wipe: no documents found");
-      return { deletedCount: 0 };
-    }
+		const results = await this.search(query, 5, containerTag)
+		if (results.length === 0) {
+			return { success: false, message: "No matching memory found to forget." }
+		}
 
-    log.debug(`wipe: found ${ids.length} documents, deleting`);
+		const target = results[0]
+		await this.deleteMemory(target.id, containerTag)
 
-    // Bulk delete
-    await this.request('POST', '/api/v1/documents/deleteBulk', { ids });
+		const preview = limitText(target.content || target.memory || "", 100)
+		return { success: true, message: `Forgot: "${preview}"` }
+	}
 
-    log.debugResponse("wipe", { deletedCount: ids.length });
-    return { deletedCount: ids.length };
-  }
+	async wipeAllMemories(): Promise<{ deletedCount: number }> {
+		log.debugRequest("wipe", { containerTag: this.containerTag })
 
-  getContainerTag(): string {
-    return this.containerTag;
-  }
+		const allIds: string[] = []
+		let page = 1
+
+		while (true) {
+			const response = await this.client.documents.list({
+				containerTags: [this.containerTag],
+				limit: 100,
+				page,
+			})
+
+			if (!response.memories || response.memories.length === 0) break
+
+			for (const doc of response.memories) {
+				if (doc.id) allIds.push(doc.id)
+			}
+
+			if (
+				!response.pagination?.totalPages ||
+				page >= response.pagination.totalPages
+			)
+				break
+			page++
+		}
+
+		if (allIds.length === 0) {
+			log.debug("wipe: no documents found")
+			return { deletedCount: 0 }
+		}
+
+		log.debug(`wipe: found ${allIds.length} documents, deleting in batches`)
+
+		let deletedCount = 0
+		for (let i = 0; i < allIds.length; i += 100) {
+			const batch = allIds.slice(i, i + 100)
+			await this.client.documents.deleteBulk({ ids: batch })
+			deletedCount += batch.length
+		}
+
+		log.debugResponse("wipe", { deletedCount })
+		return { deletedCount }
+	}
+
+	getContainerTag(): string {
+		return this.containerTag
+	}
 }

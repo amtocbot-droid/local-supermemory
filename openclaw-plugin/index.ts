@@ -1,5 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk"
-import { LocalSupermemoryClient } from "./client.ts"
+import { SupermemoryClient } from "./client.ts"
+import { registerCli, registerCliSetup } from "./commands/cli.ts"
 import { registerCommands, registerStubCommands } from "./commands/slash.ts"
 import { parseConfig, supermemoryConfigSchema } from "./config.ts"
 import { buildCaptureHandler } from "./hooks/capture.ts"
@@ -11,9 +12,9 @@ import { registerSearchTool } from "./tools/search.ts"
 import { registerStoreTool } from "./tools/store.ts"
 
 export default {
-	id: "openclaw-local-supermemory",
-	name: "Local Supermemory",
-	description: "Local Supermemory plugin for OpenClaw - no cloud required",
+	id: "openclaw-supermemory",
+	name: "Supermemory",
+	description: "OpenClaw powered by Supermemory plugin",
 	kind: "memory" as const,
 	configSchema: supermemoryConfigSchema,
 
@@ -22,21 +23,18 @@ export default {
 
 		initLogger(api.logger, cfg.debug)
 
-		// Check if local server is reachable
-		fetch(`${cfg.baseUrl}/health`)
-			.then((res) => res.json())
-			.then((data) => {
-				if ((data as { status?: string }).status === "ok") {
-					api.logger.info(`local-supermemory: server connected (${cfg.baseUrl})`)
-				}
-			})
-			.catch(() => {
-				api.logger.warn(
-					`local-supermemory: cannot reach server at ${cfg.baseUrl}. Start it with: cd ~/local-supermemory && npm start`,
-				)
-			})
+		registerCliSetup(api)
 
-		const client = new LocalSupermemoryClient(cfg.baseUrl, cfg.containerTag)
+		// Allow baseUrl without apiKey for local server
+		if (!cfg.apiKey && !cfg.baseUrl) {
+			api.logger.info(
+				"supermemory: not configured - run 'openclaw supermemory setup'",
+			)
+			registerStubCommands(api)
+			return
+		}
+
+		const client = new SupermemoryClient(cfg.apiKey ?? "", cfg.containerTag, cfg.baseUrl)
 
 		let sessionKey: string | undefined
 		const getSessionKey = () => sessionKey
@@ -62,14 +60,15 @@ export default {
 		}
 
 		registerCommands(api, client, cfg, getSessionKey)
+		registerCli(api, client, cfg)
 
 		api.registerService({
-			id: "openclaw-local-supermemory",
+			id: "openclaw-supermemory",
 			start: () => {
-				api.logger.info("local-supermemory: service started")
+				api.logger.info("supermemory: connected")
 			},
 			stop: () => {
-				api.logger.info("local-supermemory: service stopped")
+				api.logger.info("supermemory: stopped")
 			},
 		})
 	},

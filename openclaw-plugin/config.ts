@@ -1,53 +1,174 @@
-import { Type } from "@sinclair/typebox";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import * as os from "node:os";
+import { hostname } from "node:os"
 
-export const supermemoryConfigSchema = Type.Object({
-  baseUrl: Type.Optional(Type.String({ description: "Local Supermemory server URL" })),
-  containerTag: Type.Optional(Type.String()),
-  autoRecall: Type.Optional(Type.Boolean()),
-  autoCapture: Type.Optional(Type.Boolean()),
-  maxRecallResults: Type.Optional(Type.Number()),
-  profileFrequency: Type.Optional(Type.Number()),
-  captureMode: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("everything")])),
-  debug: Type.Optional(Type.Boolean()),
-  enableCustomContainerTags: Type.Optional(Type.Boolean()),
-  customContainers: Type.Optional(Type.Array(Type.Object({
-    tag: Type.String(),
-    description: Type.String(),
-  }))),
-  customContainerInstructions: Type.Optional(Type.String()),
-});
+export type CaptureMode = "everything" | "all"
 
-export interface SupermemoryConfig {
-  baseUrl: string;
-  containerTag: string;
-  autoRecall: boolean;
-  autoCapture: boolean;
-  maxRecallResults: number;
-  profileFrequency: number;
-  captureMode: "all" | "everything";
-  debug: boolean;
-  enableCustomContainerTags: boolean;
-  customContainers: Array<{ tag: string; description: string }>;
-  customContainerInstructions: string;
+export type CustomContainer = {
+	tag: string
+	description: string
 }
 
-export function parseConfig(pluginConfig: unknown): SupermemoryConfig {
-  const cfg = (pluginConfig ?? {}) as Record<string, unknown>;
-  const defaultTag = `openclaw_${os.hostname().replace(/[^a-zA-Z0-9_]/g, "_")}`;
+export type SupermemoryConfig = {
+	apiKey: string | undefined
+	baseUrl: string | undefined
+	containerTag: string
+	autoRecall: boolean
+	autoCapture: boolean
+	maxRecallResults: number
+	profileFrequency: number
+	captureMode: CaptureMode
+	debug: boolean
+	enableCustomContainerTags: boolean
+	customContainers: CustomContainer[]
+	customContainerInstructions: string
+}
 
-  return {
-    baseUrl: (cfg.baseUrl as string) ?? "http://localhost:3456",
-    containerTag: (cfg.containerTag as string) ?? defaultTag,
-    autoRecall: (cfg.autoRecall as boolean) ?? true,
-    autoCapture: (cfg.autoCapture as boolean) ?? true,
-    maxRecallResults: (cfg.maxRecallResults as number) ?? 10,
-    profileFrequency: (cfg.profileFrequency as number) ?? 50,
-    captureMode: (cfg.captureMode as "all" | "everything") ?? "all",
-    debug: (cfg.debug as boolean) ?? false,
-    enableCustomContainerTags: (cfg.enableCustomContainerTags as boolean) ?? false,
-    customContainers: (cfg.customContainers as Array<{ tag: string; description: string }>) ?? [],
-    customContainerInstructions: (cfg.customContainerInstructions as string) ?? "",
-  };
+const ALLOWED_KEYS = [
+	"apiKey",
+	"baseUrl",
+	"containerTag",
+	"autoRecall",
+	"autoCapture",
+	"maxRecallResults",
+	"profileFrequency",
+	"captureMode",
+	"debug",
+	"enableCustomContainerTags",
+	"customContainers",
+	"customContainerInstructions",
+]
+
+function assertAllowedKeys(
+	value: Record<string, unknown>,
+	allowed: string[],
+	label: string,
+): void {
+	const unknown = Object.keys(value).filter((k) => !allowed.includes(k))
+	if (unknown.length > 0) {
+		throw new Error(`${label} has unknown keys: ${unknown.join(", ")}`)
+	}
+}
+
+function resolveEnvVars(value: string): string {
+	return value.replace(/\$\{([^}]+)\}/g, (_, envVar: string) => {
+		const envValue = process.env[envVar]
+		if (!envValue) {
+			throw new Error(`Environment variable ${envVar} is not set`)
+		}
+		return envValue
+	})
+}
+
+function sanitizeTag(raw: string): string {
+	return raw
+		.replace(/[^a-zA-Z0-9_]/g, "_")
+		.replace(/_+/g, "_")
+		.replace(/^_|_$/g, "")
+}
+
+function defaultContainerTag(): string {
+	return sanitizeTag(`openclaw_${hostname()}`)
+}
+
+export function parseConfig(raw: unknown): SupermemoryConfig {
+	const cfg =
+		raw && typeof raw === "object" && !Array.isArray(raw)
+			? (raw as Record<string, unknown>)
+			: {}
+
+	if (Object.keys(cfg).length > 0) {
+		assertAllowedKeys(cfg, ALLOWED_KEYS, "supermemory config")
+	}
+
+	let apiKey: string | undefined
+	try {
+		apiKey =
+			typeof cfg.apiKey === "string" && cfg.apiKey.length > 0
+				? resolveEnvVars(cfg.apiKey)
+				: process.env.SUPERMEMORY_OPENCLAW_API_KEY
+	} catch {
+		apiKey = undefined
+	}
+
+	const customContainers: CustomContainer[] = []
+	if (Array.isArray(cfg.customContainers)) {
+		for (const c of cfg.customContainers) {
+			if (
+				c &&
+				typeof c === "object" &&
+				typeof (c as Record<string, unknown>).tag === "string" &&
+				typeof (c as Record<string, unknown>).description === "string"
+			) {
+				customContainers.push({
+					tag: sanitizeTag((c as Record<string, unknown>).tag as string),
+					description: (c as Record<string, unknown>).description as string,
+				})
+			}
+		}
+	}
+
+	let baseUrl: string | undefined
+	try {
+		baseUrl =
+			typeof cfg.baseUrl === "string" && cfg.baseUrl.length > 0
+				? resolveEnvVars(cfg.baseUrl)
+				: process.env.SUPERMEMORY_BASE_URL
+	} catch {
+		baseUrl = undefined
+	}
+
+	return {
+		apiKey,
+		baseUrl,
+		containerTag: cfg.containerTag
+			? sanitizeTag(cfg.containerTag as string)
+			: defaultContainerTag(),
+		autoRecall: (cfg.autoRecall as boolean) ?? true,
+		autoCapture: (cfg.autoCapture as boolean) ?? true,
+		maxRecallResults: (cfg.maxRecallResults as number) ?? 10,
+		profileFrequency: (cfg.profileFrequency as number) ?? 50,
+		captureMode:
+			cfg.captureMode === "everything"
+				? ("everything" as const)
+				: ("all" as const),
+		debug: (cfg.debug as boolean) ?? false,
+		enableCustomContainerTags:
+			(cfg.enableCustomContainerTags as boolean) ?? false,
+		customContainers,
+		customContainerInstructions:
+			typeof cfg.customContainerInstructions === "string"
+				? cfg.customContainerInstructions
+				: "",
+	}
+}
+
+export const supermemoryConfigSchema = {
+	jsonSchema: {
+		type: "object",
+		additionalProperties: false,
+		properties: {
+			apiKey: { type: "string" },
+			baseUrl: { type: "string" },
+			containerTag: { type: "string" },
+			autoRecall: { type: "boolean" },
+			autoCapture: { type: "boolean" },
+			maxRecallResults: { type: "number" },
+			profileFrequency: { type: "number" },
+			captureMode: { type: "string", enum: ["all", "everything"] },
+			debug: { type: "boolean" },
+			enableCustomContainerTags: { type: "boolean" },
+			customContainers: {
+				type: "array",
+				items: {
+					type: "object",
+					properties: {
+						tag: { type: "string" },
+						description: { type: "string" },
+					},
+					required: ["tag", "description"],
+				},
+			},
+			customContainerInstructions: { type: "string" },
+		},
+	},
+	parse: parseConfig,
 }
